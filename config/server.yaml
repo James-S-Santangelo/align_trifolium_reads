@@ -1,0 +1,6 @@
+# Input files
+
+
+# Output
+results_prefix: /scratch/santang3/align_trifolium_reads/results
+log_prefix: /scratch/santang3/align_trifolium_reads/logs

@@ -1,0 +1,7 @@
+keep-going: True
+rerun-incomplete: True
+printshellcmds: True
+notemp: True
+conda-cleanup-pkgs: cache
+apptainer-args: "--bind /home --bind /scratch --bind /archive"
+
