@@ -3,14 +3,14 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Path to sample metadata TSV (must contain columns: sample, cov_cat)
-samples_file: "all_clover_samples.txt"
+samples_file: "./resources/all_clover_samples.txt"
 
 # Root directory to search recursively for FASTQs.
 # FASTQs must be named {sample}_*R1*.fastq.gz / {sample}_*R2*.fastq.gz
-fastq_dir: "/path/to/fastqs"
+fastq_dir: "/home/santang3/projects/def-santang3/raw_data/fastq"
 
 # Reference genome (indexed with bwa index and samtools faidx)
-reference: "/path/to/reference.fa"
+reference: "/home/santang3/projects/def-santang3/refs/trifolium/UTM_Trep_v1.0/GCA_030408175.1_UTM_Trep_v1.0_genomic.fna"
 
 # Output
 results_prefix: "/scratch/santang3/align_trifolium_reads/results"

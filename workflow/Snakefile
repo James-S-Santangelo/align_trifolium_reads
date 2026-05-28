@@ -1,7 +1,3 @@
-from snakemake.utils import min_version
-
-min_version("9.21.0")
-
 """
 Clover alignment pipeline
 =========================
@@ -23,17 +19,20 @@ Temp intermediates (trimmed FASTQs, lane BAMs, merged BAMs) are flat under
 {outdir}/tmp/ — no project subdir since they are deleted after use.
 """
 
-import pandas as pd
 import os
 import re
+import pandas as pd
+from snakemake.utils import min_version
+
+min_version("9.21.0")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────────────────────────────────────
 
-configfile: "config.yaml"
+configfile: "../config/server.yaml"
 
-OUTDIR    = config["outdir"]
+OUTDIR    = config["results_prefix"]
 REF       = config["reference"]
 FASTQ_DIR = config["fastq_dir"]
 
