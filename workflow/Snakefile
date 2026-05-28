@@ -1,6 +1,419 @@
-import os
-import glob
-import pandas as pd
 from snakemake.utils import min_version
 
 min_version("9.21.0")
+
+"""
+Clover alignment pipeline
+=========================
+fastp → bwa mem (per lane) → samtools sort → merge lanes → GATK MarkDuplicates
+QC: FastQC (trimmed), flagstat, mosdepth, MultiQC
+
+Notes on temp files
+-------------------
+Per-lane sorted BAMs are marked temp() but run with --notemp until no further
+sequencing is planned for a sample. Adding a new lane for a sample that has
+already been processed will require re-running fastp + bwa_mem for all lanes
+of that sample (because the temp lane BAMs will have been deleted), followed
+by merge_bams and mark_duplicates.
+
+Output structure
+----------------
+Permanent outputs go under {outdir}/{initial_project}/.
+Temp intermediates (trimmed FASTQs, lane BAMs, merged BAMs) are flat under
+{outdir}/tmp/ — no project subdir since they are deleted after use.
+"""
+
+import pandas as pd
+import os
+import re
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+
+configfile: "config.yaml"
+
+OUTDIR    = config["outdir"]
+REF       = config["reference"]
+FASTQ_DIR = config["fastq_dir"]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Sample table
+# ──────────────────────────────────────────────────────────────────────────────
+
+samples_df = pd.read_csv(config["samples_file"], sep="\t")
+samples_df = samples_df.set_index("sample")
+
+SAMPLES = samples_df.index.tolist()
+COV_CAT = samples_df["cov_cat"].to_dict()           # {sample: "high" | "low"}
+PROJECT = samples_df["initial_project"].to_dict()   # {sample: project_name}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Wildcard constraints
+# ──────────────────────────────────────────────────────────────────────────────
+
+wildcard_constraints:
+    sample  = "|".join(re.escape(s) for s in SAMPLES),
+    project = "|".join(re.escape(p) for p in set(PROJECT.values())),
+    lane    = r"\d+",
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FASTQ discovery via fast recursive scandir
+# ──────────────────────────────────────────────────────────────────────────────
+
+def run_fast_scandir(dir, sample):
+    """
+    Recursively scan `dir` for files whose names start with `{sample}_`.
+    Uses os.scandir — substantially faster than glob on large directory trees.
+    """
+    subfolders, files = [], []
+    for f in os.scandir(dir):
+        if f.is_dir():
+            subfolders.append(f.path)
+        if f.is_file():
+            if re.match(r'^{}_'.format(re.escape(sample)), f.name):
+                files.append(f.path)
+    for subdir in list(subfolders):
+        sf, f = run_fast_scandir(subdir, sample)
+        subfolders.extend(sf)
+        files.extend(f)
+    return subfolders, sorted(files)
+
+
+def split_r1_r2(files):
+    """
+    Split a flat file list into R1/R2 lists.
+    Handles: _R1_ / _R1. and _R2_ / _R2. , as well as _1.fastq / _2.fastq.
+    """
+    r1 = sorted(f for f in files if re.search(r'[_.]R1[_.]|[_.]1\.fastq', f))
+    r2 = sorted(f for f in files if re.search(r'[_.]R2[_.]|[_.]2\.fastq', f))
+    return r1, r2
+
+
+def discover_sample_fastqs(sample):
+    _, files = run_fast_scandir(FASTQ_DIR, sample)
+    r1, r2   = split_r1_r2(files)
+    if not r1:
+        raise ValueError(f"No R1 FASTQs found for '{sample}' under '{FASTQ_DIR}'")
+    if len(r1) != len(r2):
+        raise ValueError(
+            f"Sample '{sample}': {len(r1)} R1 files but {len(r2)} R2 files.\n"
+            f"  R1: {r1}\n  R2: {r2}"
+        )
+    return r1, r2
+
+
+# Build sample → R1s, R2s, lanes at startup (runs once)
+SAMPLE_R1    = {}
+SAMPLE_R2    = {}
+SAMPLE_LANES = {}
+
+for s in SAMPLES:
+    r1s, r2s = discover_sample_fastqs(s)
+    SAMPLE_R1[s]    = r1s
+    SAMPLE_R2[s]    = r2s
+    SAMPLE_LANES[s] = [str(i) for i in range(len(r1s))]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Resource helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def res(wildcards, key):
+    return config["resources"][COV_CAT[wildcards.sample]][key]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Derived target lists
+# List comprehensions (not expand) where project is sample-specific.
+# ──────────────────────────────────────────────────────────────────────────────
+
+MARKDUP_BAMS = [
+    f"{OUTDIR}/{PROJECT[s]}/markdup/{s}.markdup.bam"
+    for s in SAMPLES
+]
+FLAGSTATS = [
+    f"{OUTDIR}/{PROJECT[s]}/qc/flagstat/{s}.flagstat"
+    for s in SAMPLES
+]
+MOSDEPTHS = [
+    f"{OUTDIR}/{PROJECT[s]}/qc/mosdepth/{s}.mosdepth.summary.txt"
+    for s in SAMPLES
+]
+FASTQC_DONE = [
+    f"{OUTDIR}/{PROJECT[s]}/qc/fastqc/{s}_lane{lane}_R{read}_fastqc.zip"
+    for s    in SAMPLES
+    for lane in SAMPLE_LANES[s]
+    for read in ["1", "2"]
+]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Local rules — run on the head node, not submitted to the cluster scheduler.
+# Appropriate for steps that are fast enough not to need dedicated compute nodes.
+# Note: mosdepth is included here because --fast-mode makes it lightweight;
+# check your institution's head-node CPU/memory policies if sample counts are
+# very large.
+# ──────────────────────────────────────────────────────────────────────────────
+
+localrules: all, flagstat, mosdepth, multiqc
+
+# ──────────────────────────────────────────────────────────────────────────────
+# all
+# ──────────────────────────────────────────────────────────────────────────────
+
+rule all:
+    input:
+        MARKDUP_BAMS,
+        FLAGSTATS,
+        MOSDEPTHS,
+        FASTQC_DONE,
+        f"{OUTDIR}/qc/multiqc/multiqc_report.html",
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 1: fastp — adapter trimming per lane
+# ──────────────────────────────────────────────────────────────────────────────
+
+rule fastp:
+    input:
+        r1 = lambda wc: SAMPLE_R1[wc.sample][int(wc.lane)],
+        r2 = lambda wc: SAMPLE_R2[wc.sample][int(wc.lane)],
+    output:
+        r1   = temp(f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R1.fastq.gz"),
+        r2   = temp(f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R2.fastq.gz"),
+        json = f"{OUTDIR}/{{project}}/qc/fastp/{{sample}}_lane{{lane}}.json",
+        html = f"{OUTDIR}/{{project}}/qc/fastp/{{sample}}_lane{{lane}}.html",
+    log:
+        f"{OUTDIR}/logs/fastp/{{sample}}_lane{{lane}}.log",
+    threads: 4
+    resources:
+        mem_mb  = 4000,
+        runtime = 60,
+    params:
+        min_length = config["fastp"]["min_length"],
+        quality    = config["fastp"]["quality"],
+        extra      = config["fastp"]["extra_flags"],
+    shell:
+        """
+        fastp \
+            -i {input.r1} -I {input.r2} \
+            -o {output.r1} -O {output.r2} \
+            --json {output.json} --html {output.html} \
+            --length_required {params.min_length} \
+            --qualified_quality_phred {params.quality} \
+            {params.extra} \
+            --thread {threads} \
+            2> {log}
+        """
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 2: FastQC on trimmed reads (per lane)
+# ──────────────────────────────────────────────────────────────────────────────
+
+rule fastqc:
+    input:
+        r1 = f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R1.fastq.gz",
+        r2 = f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R2.fastq.gz",
+    output:
+        zip_r1  = f"{OUTDIR}/{{project}}/qc/fastqc/{{sample}}_lane{{lane}}_R1_fastqc.zip",
+        zip_r2  = f"{OUTDIR}/{{project}}/qc/fastqc/{{sample}}_lane{{lane}}_R2_fastqc.zip",
+        html_r1 = f"{OUTDIR}/{{project}}/qc/fastqc/{{sample}}_lane{{lane}}_R1_fastqc.html",
+        html_r2 = f"{OUTDIR}/{{project}}/qc/fastqc/{{sample}}_lane{{lane}}_R2_fastqc.html",
+    log:
+        f"{OUTDIR}/logs/fastqc/{{sample}}_lane{{lane}}.log",
+    params:
+        outdir = f"{OUTDIR}/{{project}}/qc/fastqc",
+    threads: 2
+    resources:
+        mem_mb  = 2000,
+        runtime = 30,
+    shell:
+        "fastqc --threads {threads} --outdir {params.outdir} {input.r1} {input.r2} 2> {log}"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 3: bwa mem — align per lane, pipe to samtools sort
+# ──────────────────────────────────────────────────────────────────────────────
+
+rule bwa_mem:
+    input:
+        r1  = f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R1.fastq.gz",
+        r2  = f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R2.fastq.gz",
+        ref = REF,
+    output:
+        bam = temp(f"{OUTDIR}/tmp/aligned/{{sample}}_lane{{lane}}.sorted.bam"),
+        bai = temp(f"{OUTDIR}/tmp/aligned/{{sample}}_lane{{lane}}.sorted.bam.bai"),
+    log:
+        f"{OUTDIR}/logs/bwa/{{sample}}_lane{{lane}}.log",
+    threads:  lambda wc: res(wc, "threads_align")
+    resources:
+        mem_mb  = lambda wc: res(wc, "mem_mb_align"),
+        runtime = 360,
+    params:
+        extra        = config["bwa"]["extra_flags"],
+        sort_threads = lambda wc: res(wc, "threads_sort"),
+        sort_mem_mb  = lambda wc: res(wc, "mem_mb_sort"),
+        rg = lambda wc: (
+            f"@RG\\tID:{wc.sample}_lane{wc.lane}"
+            f"\\tSM:{wc.sample}"
+            f"\\tLB:{wc.sample}"
+            f"\\tPL:ILLUMINA"
+            f"\\tPU:{wc.sample}_lane{wc.lane}"
+        ),
+    shell:
+        """
+        bwa mem \
+            -t {threads} \
+            {params.extra} \
+            -R '{params.rg}' \
+            {input.ref} {input.r1} {input.r2} \
+            2> {log} \
+        | samtools sort \
+            -@ {params.sort_threads} \
+            -m {params.sort_mem_mb}M \
+            -o {output.bam} -
+        samtools index {output.bam}
+        """
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 4: merge per-lane BAMs
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_lane_bams(wildcards):
+    return expand(
+        f"{OUTDIR}/tmp/aligned/{{sample}}_lane{{lane}}.sorted.bam",
+        sample=wildcards.sample,
+        lane=SAMPLE_LANES[wildcards.sample],
+    )
+
+rule merge_bams:
+    input:
+        bams = get_lane_bams,
+    output:
+        bam = temp(f"{OUTDIR}/tmp/merged/{{sample}}.merged.bam"),
+        bai = temp(f"{OUTDIR}/tmp/merged/{{sample}}.merged.bam.bai"),
+    log:
+        f"{OUTDIR}/logs/merge/{{sample}}.log",
+    threads: 4
+    resources:
+        mem_mb  = 8000,
+        runtime = 60,
+    shell:
+        """
+        if [ $(echo "{input.bams}" | wc -w) -eq 1 ]; then
+            ln -sf $(realpath {input.bams}) {output.bam}
+            ln -sf $(realpath {input.bams}).bai {output.bai}
+        else
+            samtools merge -f -@ {threads} {output.bam} {input.bams} 2> {log}
+            samtools index {output.bam}
+        fi
+        """
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 5: GATK MarkDuplicates
+# ──────────────────────────────────────────────────────────────────────────────
+
+rule mark_duplicates:
+    input:
+        bam = f"{OUTDIR}/tmp/merged/{{sample}}.merged.bam",
+        bai = f"{OUTDIR}/tmp/merged/{{sample}}.merged.bam.bai",
+    output:
+        bam     = f"{OUTDIR}/{{project}}/markdup/{{sample}}.markdup.bam",
+        bai     = f"{OUTDIR}/{{project}}/markdup/{{sample}}.markdup.bam.bai",
+        metrics = f"{OUTDIR}/{{project}}/markdup/{{sample}}.markdup.metrics.txt",
+    log:
+        f"{OUTDIR}/logs/markdup/{{sample}}.log",
+    threads:  lambda wc: res(wc, "threads_markdup")
+    resources:
+        mem_mb  = lambda wc: res(wc, "mem_mb_markdup"),
+        runtime = 240,
+    params:
+        optical_dist = config["markdup"]["optical_duplicate_pixel_distance"],
+        java_opts    = lambda wc: f"-Xmx{res(wc, 'mem_mb_markdup') - 2000}m",
+    shell:
+        """
+        gatk --java-options "{params.java_opts}" MarkDuplicates \
+            -I {input.bam} \
+            -O {output.bam} \
+            -M {output.metrics} \
+            --OPTICAL_DUPLICATE_PIXEL_DISTANCE {params.optical_dist} \
+            --CREATE_INDEX true \
+            --VALIDATION_STRINGENCY SILENT \
+            2> {log}
+        """
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 6: samtools flagstat — per sample, localrule
+# ──────────────────────────────────────────────────────────────────────────────
+
+rule flagstat:
+    input:
+        bam = lambda wc: f"{OUTDIR}/{PROJECT[wc.sample]}/markdup/{wc.sample}.markdup.bam",
+    output:
+        f"{OUTDIR}/{{project}}/qc/flagstat/{{sample}}.flagstat",
+    log:
+        f"{OUTDIR}/logs/flagstat/{{sample}}.log",
+    shell:
+        "samtools flagstat {input.bam} > {output} 2> {log}"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 7: mosdepth — per sample, localrule
+#
+# --fast-mode (-F): skips per-base CIGAR parsing and mate-overlap correction;
+#   uses read start/end coordinates only. Approximate but appropriate for
+#   coverage summaries.
+# --quantize: emits a quantized coverage BED instead of the large per-base
+#   output file, and always writes the .mosdepth.summary.txt MultiQC parses.
+# ──────────────────────────────────────────────────────────────────────────────
+
+rule mosdepth:
+    input:
+        bam = lambda wc: f"{OUTDIR}/{PROJECT[wc.sample]}/markdup/{wc.sample}.markdup.bam",
+        bai = lambda wc: f"{OUTDIR}/{PROJECT[wc.sample]}/markdup/{wc.sample}.markdup.bam.bai",
+    output:
+        summary = f"{OUTDIR}/{{project}}/qc/mosdepth/{{sample}}.mosdepth.summary.txt",
+        dist    = f"{OUTDIR}/{{project}}/qc/mosdepth/{{sample}}.mosdepth.global.dist.txt",
+    log:
+        f"{OUTDIR}/logs/mosdepth/{{sample}}.log",
+    params:
+        prefix   = f"{OUTDIR}/{{project}}/qc/mosdepth/{{sample}}",
+        quantize = config["mosdepth"]["quantize"],
+        min_mapq = config["mosdepth"]["min_mapq"],
+    shell:
+        """
+        mosdepth \
+            --fast-mode \
+            --quantize {params.quantize} \
+            --mapq {params.min_mapq} \
+            {params.prefix} {input.bam} \
+            2> {log}
+        """
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 8: MultiQC — combined report across all projects, localrule
+# ──────────────────────────────────────────────────────────────────────────────
+
+def multiqc_inputs(wildcards):
+    inputs = []
+    for s in SAMPLES:
+        proj = PROJECT[s]
+        for lane in SAMPLE_LANES[s]:
+            inputs.append(f"{OUTDIR}/{proj}/qc/fastp/{s}_lane{lane}.json")
+    inputs += FASTQC_DONE
+    inputs += FLAGSTATS
+    inputs += MOSDEPTHS
+    for s in SAMPLES:
+        inputs.append(f"{OUTDIR}/{PROJECT[s]}/markdup/{s}.markdup.metrics.txt")
+    return inputs
+
+
+rule multiqc:
+    input:
+        multiqc_inputs,
+    output:
+        report = f"{OUTDIR}/qc/multiqc/multiqc_report.html",
+        data   = directory(f"{OUTDIR}/qc/multiqc/multiqc_data"),
+    log:
+        f"{OUTDIR}/logs/multiqc/multiqc.log",
+    params:
+        search_dir = OUTDIR,
+        outdir     = f"{OUTDIR}/qc/multiqc",
+    shell:
+        "multiqc --force --outdir {params.outdir} {params.search_dir} 2> {log}"
+

@@ -11,3 +11,39 @@ local-cores: 1
 scheduler: greedy
 max-jobs-per-second: 1
 max-status-checks-per-second: 1
+
+fastp:
+  runtime: 60
+  cpus_per_task: 4
+
+fastqc:
+  runtime: 30
+  cpus_per_task: 2
+
+bwa_mem:
+  runtime: 360
+  cpus_per_task: 16
+
+merge_bams:
+  runtime: 60
+  cpus_per_task: 4
+
+mark_duplicates:
+  runtime: 240
+  cpus_per_task: 4
+
+flagstat:
+  runtime: 15
+  cpus_per_task: 2
+
+mosdepth:
+  runtime: 60
+  cpus_per_task: 4
+
+qualimap:
+  runtime: 120
+  cpus_per_task: 4
+
+multiqc:
+  runtime: 30
+  cpus_per_task: 1
