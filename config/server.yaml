@@ -3,7 +3,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Path to sample metadata TSV (must contain columns: sample, cov_cat)
-samples_file: "./resources/all_clover_samples.txt"
+samples_file: "../resources/all_clover_samples.txt"
 
 # Root directory to search recursively for FASTQs.
 # FASTQs must be named {sample}_*R1*.fastq.gz / {sample}_*R2*.fastq.gz
@@ -13,27 +13,10 @@ fastq_dir: "/home/santang3/projects/def-santang3/raw_data/fastq"
 reference: "/home/santang3/projects/def-santang3/refs/trifolium/UTM_Trep_v1.0/GCA_030408175.1_UTM_Trep_v1.0_genomic.fna"
 
 # Output
-results_prefix: "/scratch/santang3/align_trifolium_reads/results"
-log_prefix: "/scratch/santang3/align_trifolium_reads/logs"
+results_prefix: "/scratch/santang3/align_trifolium_reads"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Tool settings
-# ──────────────────────────────────────────────────────────────────────────────
-
-bwa:
-  extra_flags: "-Y"                 # soft-clip supplementary alignments
-
-fastp:
-  min_length: 36
-  quality: 20
-  extra_flags: "--detect_adapter_for_pe"
-
-markdup:
-  optical_duplicate_pixel_distance: 2500   # NovaSeq patterned flowcell
-
-mosdepth:
-  quantize: "0:1:5:10:20:50:"      # coverage bin boundaries for quantized output
-  min_mapq: 1
+# Scratch space for sambamba sort temporary files
+tmpdir: "$SLURM_TMPDIR"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Resources by coverage category
@@ -41,18 +24,15 @@ mosdepth:
 
 resources:
   high:
-    threads_align: 16
-    threads_sort: 8
+    threads_bwa: 16       # mem_mb = threads * 2000 = 32,000 MB
+    threads_sort: 8       # mem_mb = threads * 4000 = 32,000 MB (passed as total to sambamba)
     threads_markdup: 4
-    threads_mosdepth: 4
-    mem_mb_align: 24000
-    mem_mb_sort: 8000       # per-thread; samtools sort -m
+    runtime_merge: 480
     mem_mb_markdup: 16000
   low:
-    threads_align: 8
-    threads_sort: 4
+    threads_bwa: 8        # mem_mb = threads * 2000 = 16,000 MB
+    threads_sort: 4       # mem_mb = threads * 4000 = 16,000 MB
     threads_markdup: 2
-    threads_mosdepth: 2
-    mem_mb_align: 12000
-    mem_mb_sort: 4000
+    runtime_merge: 120
     mem_mb_markdup: 8000
+ 

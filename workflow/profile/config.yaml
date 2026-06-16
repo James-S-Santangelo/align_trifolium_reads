@@ -1,7 +1,7 @@
 keep-going: True
 rerun-incomplete: True
 printshellcmds: True
-notemp: True
+notemp: False
 conda-cleanup-pkgs: cache
 conda-prefix: "/home/santang3/scratch/align_trifolium_reads/conda_envs"
 apptainer-args: "--bind /home --bind /scratch --bind /archive"

@@ -82,10 +82,19 @@ def run_fast_scandir(dir, sample):
 def split_r1_r2(files):
     """
     Split a flat file list into R1/R2 lists.
-    Handles: _R1_ / _R1. and _R2_ / _R2. , as well as _1.fastq / _2.fastq.
+
+    Handles two naming conventions:
+      1. Illumina standard: {sample}_S###_L###_R1_001.fastq.gz
+         Matched by: _R1_ or _R2_ anywhere in the filename.
+      2. BGI/custom: {sample}_{barcode}_{flowcell}_{lane}_1.fq.gz
+         Matched by: _1.fq.gz or _2.fq.gz at end of filename ($ anchor
+         prevents false matches on sample name components like lc_1_ or
+         Thessa_2_ that contain _1_ / _2_ mid-string).
+
+    Both .fq.gz and .fastq.gz extensions are handled via f(ast)?q.gz.
     """
-    r1 = sorted(f for f in files if re.search(r'[_.]R1[_.]|[_.]1\.fastq', f))
-    r2 = sorted(f for f in files if re.search(r'[_.]R2[_.]|[_.]2\.fastq', f))
+    r1 = sorted(f for f in files if re.search(r'_R1[_.]|_1\.f(ast)?q\.gz$', f))
+    r2 = sorted(f for f in files if re.search(r'_R2[_.]|_2\.f(ast)?q\.gz$', f))
     return r1, r2
 
 
@@ -112,6 +121,25 @@ for s in SAMPLES:
     SAMPLE_R1[s]    = r1s
     SAMPLE_R2[s]    = r2s
     SAMPLE_LANES[s] = [str(i) for i in range(len(r1s))]
+
+# print("\n" + "─" * 72)
+# print("FASTQ DISCOVERY SUMMARY")
+# print("─" * 72)
+# for s in SAMPLES:
+#     n = len(SAMPLE_LANES[s])
+#     print(f"  {s}  [{PROJECT[s]} | {COV_CAT[s]} | {n} lane{'s' if n > 1 else ' '}]")
+#     for i, lane in enumerate(SAMPLE_LANES[s]):
+#         r1 = os.path.basename(SAMPLE_R1[s][int(lane)])
+#         r2 = os.path.basename(SAMPLE_R2[s][int(lane)])
+#         print(f"    lane {lane}  R1: {r1}")
+#         print(f"           R2: {r2}")
+# print("─" * 72)
+# multi = [s for s in SAMPLES if len(SAMPLE_LANES[s]) > 1]
+# print(f"  {len(SAMPLES)} samples | {len(set(PROJECT.values()))} projects | "
+#       f"{sum(len(v) for v in SAMPLE_LANES.values())} total lanes")
+# if multi:
+#     print(f"  Multi-lane samples ({len(multi)}): {', '.join(multi)}")
+# print("─" * 72 + "\n")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Resource helpers
@@ -144,6 +172,15 @@ FASTQC_DONE = [
     for read in ["1", "2"]
 ]
 
+# Projects present in the sample sheet
+PROJECTS = sorted(set(PROJECT.values()))
+
+# One MultiQC report per project
+MULTIQC_REPORTS = [
+    f"{OUTDIR}/{p}/qc/multiqc/multiqc_report.html"
+    for p in PROJECTS
+]
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Local rules — run on the head node, not submitted to the cluster scheduler.
 # Appropriate for steps that are fast enough not to need dedicated compute nodes.
@@ -152,7 +189,7 @@ FASTQC_DONE = [
 # very large.
 # ──────────────────────────────────────────────────────────────────────────────
 
-localrules: all, flagstat, mosdepth, multiqc
+localrules: all, flagstat, mosdepth
 
 # ──────────────────────────────────────────────────────────────────────────────
 # all
@@ -164,7 +201,7 @@ rule all:
         FLAGSTATS,
         MOSDEPTHS,
         FASTQC_DONE,
-        f"{OUTDIR}/qc/multiqc/multiqc_report.html",
+        MULTIQC_REPORTS
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule 1: fastp — adapter trimming per lane
@@ -175,20 +212,20 @@ rule fastp:
         r1 = lambda wc: SAMPLE_R1[wc.sample][int(wc.lane)],
         r2 = lambda wc: SAMPLE_R2[wc.sample][int(wc.lane)],
     output:
-        r1   = temp(f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R1.fastq.gz"),
-        r2   = temp(f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R2.fastq.gz"),
+        r1   = temp(f"{OUTDIR}/tmp/trimmed/{{project}}/{{sample}}_lane{{lane}}_R1.fastq.gz"),
+        r2   = temp(f"{OUTDIR}/tmp/trimmed/{{project}}/{{sample}}_lane{{lane}}_R2.fastq.gz"),
         json = f"{OUTDIR}/{{project}}/qc/fastp/{{sample}}_lane{{lane}}.json",
         html = f"{OUTDIR}/{{project}}/qc/fastp/{{sample}}_lane{{lane}}.html",
+    conda: "envs/env.yaml"
     log:
-        f"{OUTDIR}/logs/fastp/{{sample}}_lane{{lane}}.log",
+        f"{OUTDIR}/logs/fastp/{{project}}/{{sample}}_lane{{lane}}.log",
     threads: 4
     resources:
         mem_mb  = 4000,
         runtime = 60,
     params:
-        min_length = config["fastp"]["min_length"],
-        quality    = config["fastp"]["quality"],
-        extra      = config["fastp"]["extra_flags"],
+        min_length = 36,
+        quality    = 20
     shell:
         """
         fastp \
@@ -197,7 +234,7 @@ rule fastp:
             --json {output.json} --html {output.html} \
             --length_required {params.min_length} \
             --qualified_quality_phred {params.quality} \
-            {params.extra} \
+            --detect_adapter_for_pe \
             --thread {threads} \
             2> {log}
         """
@@ -208,15 +245,16 @@ rule fastp:
 
 rule fastqc:
     input:
-        r1 = f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R1.fastq.gz",
-        r2 = f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R2.fastq.gz",
+        r1 = rules.fastp.output.r1,
+        r2 = rules.fastp.output.r2,
     output:
         zip_r1  = f"{OUTDIR}/{{project}}/qc/fastqc/{{sample}}_lane{{lane}}_R1_fastqc.zip",
         zip_r2  = f"{OUTDIR}/{{project}}/qc/fastqc/{{sample}}_lane{{lane}}_R2_fastqc.zip",
         html_r1 = f"{OUTDIR}/{{project}}/qc/fastqc/{{sample}}_lane{{lane}}_R1_fastqc.html",
         html_r2 = f"{OUTDIR}/{{project}}/qc/fastqc/{{sample}}_lane{{lane}}_R2_fastqc.html",
+    conda: "envs/env.yaml"
     log:
-        f"{OUTDIR}/logs/fastqc/{{sample}}_lane{{lane}}.log",
+        f"{OUTDIR}/logs/fastqc/{{project}}/{{sample}}_lane{{lane}}.log",
     params:
         outdir = f"{OUTDIR}/{{project}}/qc/fastqc",
     threads: 2
@@ -227,27 +265,24 @@ rule fastqc:
         "fastqc --threads {threads} --outdir {params.outdir} {input.r1} {input.r2} 2> {log}"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rule 3: bwa mem — align per lane, pipe to samtools sort
+# Rule 3: bwa mem — align per lane, output unsorted BAM
 # ──────────────────────────────────────────────────────────────────────────────
 
 rule bwa_mem:
     input:
-        r1  = f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R1.fastq.gz",
-        r2  = f"{OUTDIR}/tmp/trimmed/{{sample}}_lane{{lane}}_R2.fastq.gz",
+        r1 = rules.fastp.output.r1,
+        r2 = rules.fastp.output.r2,
         ref = REF,
     output:
-        bam = temp(f"{OUTDIR}/tmp/aligned/{{sample}}_lane{{lane}}.sorted.bam"),
-        bai = temp(f"{OUTDIR}/tmp/aligned/{{sample}}_lane{{lane}}.sorted.bam.bai"),
+        bam = temp(f"{OUTDIR}/tmp/aligned/{{project}}/{{sample}}_lane{{lane}}.bam"),
+    conda: "envs/env.yaml"
     log:
-        f"{OUTDIR}/logs/bwa/{{sample}}_lane{{lane}}.log",
-    threads:  lambda wc: res(wc, "threads_align")
+        f"{OUTDIR}/logs/bwa_mem/{{project}}/{{sample}}_lane{{lane}}.log",
+    threads: lambda wc: res(wc, "threads_bwa")
     resources:
-        mem_mb  = lambda wc: res(wc, "mem_mb_align"),
-        runtime = 360,
+        mem_mb  = lambda wc, threads: threads * 2000,
+        runtime = lambda wc, attempt: attempt * 240,
     params:
-        extra        = config["bwa"]["extra_flags"],
-        sort_threads = lambda wc: res(wc, "threads_sort"),
-        sort_mem_mb  = lambda wc: res(wc, "mem_mb_sort"),
         rg = lambda wc: (
             f"@RG\\tID:{wc.sample}_lane{wc.lane}"
             f"\\tSM:{wc.sample}"
@@ -257,17 +292,36 @@ rule bwa_mem:
         ),
     shell:
         """
-        bwa mem \
+        ( bwa mem -t {threads} -Y -K 100000000 -R '{params.rg}' \
+            {input.ref} {input.r1} {input.r2} | \
+            samtools view -hb -o {output.bam} - ) 2> {log}
+        """
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 4: sambamba sort — coordinate-sort per-lane BAM
+# ──────────────────────────────────────────────────────────────────────────────
+
+rule sort_bam:
+    input:
+        bam = rules.bwa_mem.output,
+    output:
+        bam = temp(f"{OUTDIR}/tmp/sorted/{{project}}/{{sample}}_lane{{lane}}.sorted.bam"),
+        bai = temp(f"{OUTDIR}/tmp/sorted/{{project}}/{{sample}}_lane{{lane}}.sorted.bam.bai"),
+    conda: "envs/env.yaml"
+    log:
+        f"{OUTDIR}/logs/sort_bam/{{project}}/{{sample}}_lane{{lane}}.log",
+    threads: lambda wc: res(wc, "threads_sort")
+    resources:
+        mem_mb  = lambda wc, threads: threads * 4000,
+        runtime = lambda wc, attempt: attempt * 120,
+        tmpdir  = config["tmpdir"]
+    shell:
+        """
+        ( sambamba sort \
             -t {threads} \
-            {params.extra} \
-            -R '{params.rg}' \
-            {input.ref} {input.r1} {input.r2} \
-            2> {log} \
-        | samtools sort \
-            -@ {params.sort_threads} \
-            -m {params.sort_mem_mb}M \
-            -o {output.bam} -
-        samtools index {output.bam}
+            -m {resources.mem_mb}M \
+            --tmpdir {resources.tmpdir}/{wildcards.sample}_lane{wildcards.lane} \
+            -o {output.bam} {input.bam} ) 2> {log}
         """
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -276,7 +330,8 @@ rule bwa_mem:
 
 def get_lane_bams(wildcards):
     return expand(
-        f"{OUTDIR}/tmp/aligned/{{sample}}_lane{{lane}}.sorted.bam",
+        rules.sort_bam.output.bam,
+        project=PROJECT[wildcards.sample],
         sample=wildcards.sample,
         lane=SAMPLE_LANES[wildcards.sample],
     )
@@ -285,23 +340,19 @@ rule merge_bams:
     input:
         bams = get_lane_bams,
     output:
-        bam = temp(f"{OUTDIR}/tmp/merged/{{sample}}.merged.bam"),
-        bai = temp(f"{OUTDIR}/tmp/merged/{{sample}}.merged.bam.bai"),
+        bam = temp(f"{OUTDIR}/tmp/merged/{{project}}/{{sample}}.merged.bam"),
+        bai = temp(f"{OUTDIR}/tmp/merged/{{project}}/{{sample}}.merged.bam.bai"),
+    conda: "envs/env.yaml"
     log:
-        f"{OUTDIR}/logs/merge/{{sample}}.log",
+        f"{OUTDIR}/logs/merge_bams/{{project}}/{{sample}}.log",
     threads: 4
     resources:
-        mem_mb  = 8000,
-        runtime = 60,
+        mem_mb  = lambda wc, attempt: attempt * 4000,
+        runtime = lambda wc, attempt: attempt * res(wc, "runtime_merge"),
     shell:
         """
-        if [ $(echo "{input.bams}" | wc -w) -eq 1 ]; then
-            ln -sf $(realpath {input.bams}) {output.bam}
-            ln -sf $(realpath {input.bams}).bai {output.bai}
-        else
-            samtools merge -f -@ {threads} {output.bam} {input.bams} 2> {log}
-            samtools index {output.bam}
-        fi
+        samtools merge -f -@ {threads} {output.bam} {input.bams} 2> {log}
+        samtools index {output.bam}
         """
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -310,21 +361,23 @@ rule merge_bams:
 
 rule mark_duplicates:
     input:
-        bam = f"{OUTDIR}/tmp/merged/{{sample}}.merged.bam",
-        bai = f"{OUTDIR}/tmp/merged/{{sample}}.merged.bam.bai",
+        bam = rules.merge_bams.output.bam,
+        bai = rules.merge_bams.output.bai,
     output:
         bam     = f"{OUTDIR}/{{project}}/markdup/{{sample}}.markdup.bam",
         bai     = f"{OUTDIR}/{{project}}/markdup/{{sample}}.markdup.bam.bai",
         metrics = f"{OUTDIR}/{{project}}/markdup/{{sample}}.markdup.metrics.txt",
+    conda: "envs/env.yaml"
     log:
-        f"{OUTDIR}/logs/markdup/{{sample}}.log",
+        f"{OUTDIR}/logs/mark_duplicates/{{project}}/{{sample}}.log",
     threads:  lambda wc: res(wc, "threads_markdup")
     resources:
-        mem_mb  = lambda wc: res(wc, "mem_mb_markdup"),
-        runtime = 240,
+        mem_mb  = lambda wc, attempt: attempt * res(wc, "mem_mb_markdup"),
+        runtime = lambda wc, attempt: attempt * 240,
+        tmpdir  = config["tmpdir"],
     params:
-        optical_dist = config["markdup"]["optical_duplicate_pixel_distance"],
-        java_opts    = lambda wc: f"-Xmx{res(wc, 'mem_mb_markdup') - 2000}m",
+        optical_dist = 2500,
+        java_opts = lambda wc, resources: f"-Xmx{int(resources.mem_mb * 0.85)}m",
     shell:
         """
         gatk --java-options "{params.java_opts}" MarkDuplicates \
@@ -332,9 +385,10 @@ rule mark_duplicates:
             -O {output.bam} \
             -M {output.metrics} \
             --OPTICAL_DUPLICATE_PIXEL_DISTANCE {params.optical_dist} \
-            --CREATE_INDEX true \
+            --TMP_DIR {resources.tmpdir} \
             --VALIDATION_STRINGENCY SILENT \
             2> {log}
+        samtools index -@ {threads} {output.bam}
         """
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -346,19 +400,14 @@ rule flagstat:
         bam = lambda wc: f"{OUTDIR}/{PROJECT[wc.sample]}/markdup/{wc.sample}.markdup.bam",
     output:
         f"{OUTDIR}/{{project}}/qc/flagstat/{{sample}}.flagstat",
+    conda: "envs/env.yaml"
     log:
-        f"{OUTDIR}/logs/flagstat/{{sample}}.log",
+        f"{OUTDIR}/logs/flagstat/{{project}}/{{sample}}.log",
     shell:
         "samtools flagstat {input.bam} > {output} 2> {log}"
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule 7: mosdepth — per sample, localrule
-#
-# --fast-mode (-F): skips per-base CIGAR parsing and mate-overlap correction;
-#   uses read start/end coordinates only. Approximate but appropriate for
-#   coverage summaries.
-# --quantize: emits a quantized coverage BED instead of the large per-base
-#   output file, and always writes the .mosdepth.summary.txt MultiQC parses.
 # ──────────────────────────────────────────────────────────────────────────────
 
 rule mosdepth:
@@ -368,12 +417,13 @@ rule mosdepth:
     output:
         summary = f"{OUTDIR}/{{project}}/qc/mosdepth/{{sample}}.mosdepth.summary.txt",
         dist    = f"{OUTDIR}/{{project}}/qc/mosdepth/{{sample}}.mosdepth.global.dist.txt",
+    conda: "envs/env.yaml"
     log:
-        f"{OUTDIR}/logs/mosdepth/{{sample}}.log",
+        f"{OUTDIR}/logs/mosdepth/{{project}}/{{sample}}.log",
     params:
         prefix   = f"{OUTDIR}/{{project}}/qc/mosdepth/{{sample}}",
-        quantize = config["mosdepth"]["quantize"],
-        min_mapq = config["mosdepth"]["min_mapq"],
+        quantize = "0:1:5:10:20:50:",
+        min_mapq = 1,
     shell:
         """
         mosdepth \
@@ -385,20 +435,23 @@ rule mosdepth:
         """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rule 8: MultiQC — combined report across all projects, localrule
+# Rule 8: MultiQC — combined report across all projects
 # ──────────────────────────────────────────────────────────────────────────────
 
 def multiqc_inputs(wildcards):
+    """Collect QC files for a single project."""
+    proj = wildcards.project
     inputs = []
-    for s in SAMPLES:
-        proj = PROJECT[s]
+    for s in (s for s in SAMPLES if PROJECT[s] == proj):
         for lane in SAMPLE_LANES[s]:
             inputs.append(f"{OUTDIR}/{proj}/qc/fastp/{s}_lane{lane}.json")
-    inputs += FASTQC_DONE
-    inputs += FLAGSTATS
-    inputs += MOSDEPTHS
-    for s in SAMPLES:
-        inputs.append(f"{OUTDIR}/{PROJECT[s]}/markdup/{s}.markdup.metrics.txt")
+            for read in ["1", "2"]:
+                inputs.append(
+                    f"{OUTDIR}/{proj}/qc/fastqc/{s}_lane{lane}_R{read}_fastqc.zip"
+                )
+        inputs.append(f"{OUTDIR}/{proj}/qc/flagstat/{s}.flagstat")
+        inputs.append(f"{OUTDIR}/{proj}/qc/mosdepth/{s}.mosdepth.summary.txt")
+        inputs.append(f"{OUTDIR}/{proj}/markdup/{s}.markdup.metrics.txt")
     return inputs
 
 
@@ -406,13 +459,22 @@ rule multiqc:
     input:
         multiqc_inputs,
     output:
-        report = f"{OUTDIR}/qc/multiqc/multiqc_report.html",
-        data   = directory(f"{OUTDIR}/qc/multiqc/multiqc_data"),
+        report = f"{OUTDIR}/{{project}}/qc/multiqc/multiqc_report.html",
+        data   = directory(f"{OUTDIR}/{{project}}/qc/multiqc/multiqc_data"),
+    conda: "envs/env.yaml"
     log:
-        f"{OUTDIR}/logs/multiqc/multiqc.log",
+        f"{OUTDIR}/logs/multiqc/{{project}}.log",
+    threads: 1
+    resources:
+        mem_mb  = 8000,
+        runtime = lambda wc, attempt: attempt * 360,
     params:
-        search_dir = OUTDIR,
-        outdir     = f"{OUTDIR}/qc/multiqc",
+        outdir    = f"{OUTDIR}/{{project}}/qc/multiqc",
+        file_list = f"{OUTDIR}/{{project}}/qc/multiqc/multiqc_filelist.txt",
     shell:
-        "multiqc --force --outdir {params.outdir} {params.search_dir} 2> {log}"
+        """
+        mkdir -p {params.outdir}
+        printf "%s\n" {input} > {params.file_list}
+        multiqc --force --outdir {params.outdir} --file-list {params.file_list} 2> {log}
+        """
 
