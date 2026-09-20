@@ -93,8 +93,9 @@ def split_r1_r2(files):
 
     Both .fq.gz and .fastq.gz extensions are handled via f(ast)?q.gz.
     """
-    r1 = sorted(f for f in files if re.search(r'_R1[_.]|_1\.f(ast)?q\.gz$', f))
-    r2 = sorted(f for f in files if re.search(r'_R2[_.]|_2\.f(ast)?q\.gz$', f))
+    fq = [f for f in files if re.search(r'\.f(ast)?q\.gz$|\.f(ast)?q$', f)]
+    r1 = sorted(f for f in fq if re.search(r'_R1[_.]|_1\.f(ast)?q(\.gz)?$', f))
+    r2 = sorted(f for f in fq if re.search(r'_R2[_.]|_2\.f(ast)?q(\.gz)?$', f))
     return r1, r2
 
 
