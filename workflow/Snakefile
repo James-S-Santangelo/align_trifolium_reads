@@ -10,7 +10,7 @@ Per-lane sorted BAMs are marked temp() but run with --notemp until no further
 sequencing is planned for a sample. Adding a new lane for a sample that has
 already been processed will require re-running fastp + bwa_mem for all lanes
 of that sample (because the temp lane BAMs will have been deleted), followed
-by merge_bams and mark_duplicates.
+by mark_duplicates, which takes all lanes as input.
 
 Output structure
 ----------------
@@ -21,6 +21,7 @@ Temp intermediates (trimmed FASTQs, lane BAMs, merged BAMs) are flat under
 
 import os
 import re
+import math
 import pandas as pd
 from snakemake.utils import min_version
 
@@ -123,6 +124,14 @@ for s in SAMPLES:
     SAMPLE_R2[s]    = r2s
     SAMPLE_LANES[s] = [str(i) for i in range(len(r1s))]
 
+# Use raw FASTQ size to predict alignment resources
+LANE_GB = {(s, l): (os.path.getsize(SAMPLE_R1[s][int(l)]) + os.path.getsize(SAMPLE_R2[s][int(l)])) / 1e9
+           for s in SAMPLES for l in SAMPLE_LANES[s]}
+SAMPLE_GB = {s: sum(LANE_GB[(s, l)] for l in SAMPLE_LANES[s]) for s in SAMPLES}
+
+def lane_rt(a, b):
+    return lambda wc, attempt: attempt * math.ceil(a + b * LANE_GB[(wc.sample, wc.lane)])
+
 # print("\n" + "─" * 72)
 # print("FASTQ DISCOVERY SUMMARY")
 # print("─" * 72)
@@ -220,10 +229,10 @@ rule fastp:
     conda: "envs/env.yaml"
     log:
         f"{OUTDIR}/logs/fastp/{{project}}/{{sample}}_lane{{lane}}.log",
-    threads: 4
+    threads: 2
     resources:
-        mem_mb  = 4000,
-        runtime = 60,
+        mem_mb  = 5000,
+        runtime = lane_rt(15, 3) 
     params:
         min_length = 36,
         quality    = 20
@@ -260,8 +269,8 @@ rule fastqc:
         outdir = f"{OUTDIR}/{{project}}/qc/fastqc",
     threads: 2
     resources:
-        mem_mb  = 2000,
-        runtime = 30,
+        mem_mb  = 2500,
+        runtime = lane_rt(15, 3)
     shell:
         "fastqc --threads {threads} --outdir {params.outdir} {input.r1} {input.r2} 2> {log}"
 
@@ -280,9 +289,11 @@ rule bwa_mem:
     log:
         f"{OUTDIR}/logs/bwa_mem/{{project}}/{{sample}}_lane{{lane}}.log",
     threads: lambda wc: res(wc, "threads_bwa")
+    group: "align_{sample}_{lane}"
     resources:
         mem_mb  = lambda wc, threads: threads * 2000,
-        runtime = lambda wc, attempt: attempt * 240,
+        runtime = lane_rt(30, 45),
+        tmpdir  = config["tmpdir"]
     params:
         rg = lambda wc: (
             f"@RG\\tID:{wc.sample}_lane{wc.lane}"
@@ -312,6 +323,7 @@ rule sort_bam:
     log:
         f"{OUTDIR}/logs/sort_bam/{{project}}/{{sample}}_lane{{lane}}.log",
     threads: lambda wc: res(wc, "threads_sort")
+    group: "align_{sample}_{lane}"
     resources:
         mem_mb  = lambda wc, threads: threads * 4000,
         runtime = lambda wc, attempt: attempt * 120,
@@ -326,7 +338,7 @@ rule sort_bam:
         """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rule 4: merge per-lane BAMs
+# Rule 4: GATK MarkDuplicates
 # ──────────────────────────────────────────────────────────────────────────────
 
 def get_lane_bams(wildcards):
@@ -337,33 +349,9 @@ def get_lane_bams(wildcards):
         lane=SAMPLE_LANES[wildcards.sample],
     )
 
-rule merge_bams:
-    input:
-        bams = get_lane_bams,
-    output:
-        bam = temp(f"{OUTDIR}/tmp/merged/{{project}}/{{sample}}.merged.bam"),
-        bai = temp(f"{OUTDIR}/tmp/merged/{{project}}/{{sample}}.merged.bam.bai"),
-    conda: "envs/env.yaml"
-    log:
-        f"{OUTDIR}/logs/merge_bams/{{project}}/{{sample}}.log",
-    threads: 4
-    resources:
-        mem_mb  = lambda wc, attempt: attempt * 4000,
-        runtime = lambda wc, attempt: attempt * res(wc, "runtime_merge"),
-    shell:
-        """
-        samtools merge -f -@ {threads} {output.bam} {input.bams} 2> {log}
-        samtools index {output.bam}
-        """
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Rule 5: GATK MarkDuplicates
-# ──────────────────────────────────────────────────────────────────────────────
-
 rule mark_duplicates:
     input:
-        bam = rules.merge_bams.output.bam,
-        bai = rules.merge_bams.output.bai,
+        bams = get_lane_bams
     output:
         bam     = f"{OUTDIR}/{{project}}/markdup/{{sample}}.markdup.bam",
         bai     = f"{OUTDIR}/{{project}}/markdup/{{sample}}.markdup.bam.bai",
@@ -371,18 +359,19 @@ rule mark_duplicates:
     conda: "envs/env.yaml"
     log:
         f"{OUTDIR}/logs/mark_duplicates/{{project}}/{{sample}}.log",
-    threads:  lambda wc: res(wc, "threads_markdup")
+    threads: 2
     resources:
-        mem_mb  = lambda wc, attempt: attempt * res(wc, "mem_mb_markdup"),
-        runtime = lambda wc, attempt: attempt * 240,
+        mem_mb  = lambda wc, attempt: attempt * (16000 if SAMPLE_GB[wc.sample] > 15 else 8000),
+        runtime = lambda wc, attempt: attempt * math.ceil(30 + 4 * SAMPLE_GB[wc.sample]),
         tmpdir  = config["tmpdir"],
     params:
         optical_dist = 2500,
-        java_opts = lambda wc, resources: f"-Xmx{int(resources.mem_mb * 0.85)}m",
+        java_opts = lambda wc, resources: f"-Xmx{resources.mem_mb - 2000}m",
+        inputs    = lambda wc, input: " ".join(f"-I {b}" for b in input.bams),
     shell:
         """
         gatk --java-options "{params.java_opts}" MarkDuplicates \
-            -I {input.bam} \
+            {params.inputs} \
             -O {output.bam} \
             -M {output.metrics} \
             --OPTICAL_DUPLICATE_PIXEL_DISTANCE {params.optical_dist} \
@@ -393,7 +382,7 @@ rule mark_duplicates:
         """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rule 6: samtools flagstat — per sample, localrule
+# Rule 5: samtools flagstat — per sample, localrule
 # ──────────────────────────────────────────────────────────────────────────────
 
 rule flagstat:
@@ -408,7 +397,7 @@ rule flagstat:
         "samtools flagstat {input.bam} > {output} 2> {log}"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rule 7: mosdepth — per sample, localrule
+# Rule 6: mosdepth — per sample, localrule
 # ──────────────────────────────────────────────────────────────────────────────
 
 rule mosdepth:
@@ -436,7 +425,7 @@ rule mosdepth:
         """
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Rule 8: MultiQC — combined report across all projects
+# Rule 7: MultiQC — combined report across all projects
 # ──────────────────────────────────────────────────────────────────────────────
 
 def multiqc_inputs(wildcards):
@@ -467,7 +456,7 @@ rule multiqc:
         f"{OUTDIR}/logs/multiqc/{{project}}.log",
     threads: 1
     resources:
-        mem_mb  = 8000,
+        mem_mb = lambda wc, attempt: attempt * 16000,
         runtime = lambda wc, attempt: attempt * 360,
     params:
         outdir    = f"{OUTDIR}/{{project}}/qc/multiqc",

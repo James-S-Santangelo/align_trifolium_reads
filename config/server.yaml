@@ -8,15 +8,15 @@ samples_file: "../resources/TCAG_Trep_GWAS_reseq_samples.txt"
 
 # Root directory to search recursively for FASTQs.
 # FASTQs must be named {sample}_*R1*.fastq.gz / {sample}_*R2*.fastq.gz
-# fastq_dir: "/home/santang3/projects/def-santang3/raw_data/fastq" # Narval
-fastq_dir: "/archive/raw_data/fastq/clover_gwas/raw_reads/tcag_reseq/lane1" # Nepenthes
+fastq_dir: "/home/santang3/projects/def-santang3/raw_data/clover_gwas" # Narval
+# fastq_dir: "/archive/raw_data/fastq/clover_gwas/raw_reads/tcag_reseq/lane1" # Nepenthes
 
 # Reference genome (indexed with bwa index and samtools faidx)
-# reference: "/home/santang3/projects/def-santang3/refs/trifolium/UTM_Trep_v1.0/GCA_030408175.1_UTM_Trep_v1.0_genomic.fna" # (Narval)
-reference: "/scratch/references/trifolium/repens/UTM_Trep_v1.0/GCA_030914245.1_UTM_Trep_v1.0_hap1_genomic.fna" # (Npenethes)
+reference: "/home/santang3/projects/def-santang3/refs/trifolium/UTM_Trep_v1.0/GCA_030408175.1_UTM_Trep_v1.0_genomic.fna" # (Narval)
+# reference: "/scratch/references/trifolium/repens/UTM_Trep_v1.0/GCA_030914245.1_UTM_Trep_v1.0_hap1_genomic.fna" # (Npenethes)
 
 # Output
-results_prefix: "/scratch/jsantang/align_trifolium_reads"
+results_prefix: "/scratch/santang3/align_trifolium_reads/ref_panel"
 
 # Scratch space for sambamba sort temporary files
 tmpdir: "$SLURM_TMPDIR"
@@ -34,8 +34,8 @@ resources:
     mem_mb_markdup: 16000
   low:
     threads_bwa: 8        # mem_mb = threads * 2000 = 16,000 MB
-    threads_sort: 4       # mem_mb = threads * 4000 = 16,000 MB
-    threads_markdup: 2
-    runtime_merge: 120
+    threads_sort: 8       # mem_mb = threads * 4000 = 16,000 MB
+    threads_markdup: 4
+    runtime_merge: 240
     mem_mb_markdup: 8000
  

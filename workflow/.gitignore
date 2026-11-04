@@ -1,1 +1,5 @@
 .snakemake/
+smk_controller*
+usage.*
+snakemake_dryrun*
+smk_slurm_usage.py
