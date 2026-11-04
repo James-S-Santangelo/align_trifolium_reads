@@ -269,7 +269,7 @@ rule fastqc:
         outdir = f"{OUTDIR}/{{project}}/qc/fastqc",
     threads: 2
     resources:
-        mem_mb  = 2500,
+        mem_mb  = 2000,
         runtime = lane_rt(15, 3)
     shell:
         "fastqc --threads {threads} --outdir {params.outdir} {input.r1} {input.r2} 2> {log}"
@@ -325,14 +325,16 @@ rule sort_bam:
     threads: lambda wc: res(wc, "threads_sort")
     group: "align_{sample}_{lane}"
     resources:
-        mem_mb  = lambda wc, threads: threads * 4000,
+        mem_mb  = lambda wc, attempt: attempt * 16000,
         runtime = lambda wc, attempt: attempt * 120,
         tmpdir  = config["tmpdir"]
+    params:
+        sort_mem = lambda wc, resources: int(resources.mem_mb * 0.6)
     shell:
         """
         ( sambamba sort \
             -t {threads} \
-            -m {resources.mem_mb}M \
+            -m {params.sort_mem}M \
             --tmpdir {resources.tmpdir}/{wildcards.sample}_lane{wildcards.lane} \
             -o {output.bam} {input.bam} ) 2> {log}
         """
@@ -457,7 +459,7 @@ rule multiqc:
     threads: 1
     resources:
         mem_mb = lambda wc, attempt: attempt * 16000,
-        runtime = lambda wc, attempt: attempt * 360,
+        runtime = lambda wc, attempt: attempt * 240,
     params:
         outdir    = f"{OUTDIR}/{{project}}/qc/multiqc",
         file_list = f"{OUTDIR}/{{project}}/qc/multiqc/multiqc_filelist.txt",
