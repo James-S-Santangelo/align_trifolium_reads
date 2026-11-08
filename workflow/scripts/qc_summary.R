@@ -1,5 +1,7 @@
 # Summarise per-project MultiQC general stats into two tables across projects:
-#   1. sample_qc: one row per sample (mosdepth, samtools flagstat, Picard)
+#   1. sample_qc: one row per sample: sample metadata (all columns of
+#      metadata_file except cov_cat, values copied verbatim) followed by
+#      mosdepth, samtools flagstat and Picard metrics
 #   2. read_qc:   one row per lane (fastp on the read pair; FastQC on R1 and R2)
 #
 # Called from rule qc_summary via `script:`, so inputs come from the
@@ -161,7 +163,24 @@ if (length(problems_found) > 0) {
 # keeps counts exact and removes the floating-point noise
 tidy_numbers <- function(d) mutate(d, across(where(is.double), ~ round(.x, 6)))
 
-write_tsv(tidy_numbers(sample_qc), snakemake@output[["sample_qc"]], na = "NA")
+# ── Join sample metadata ────────────────────────────────────────────────────
+# Read verbatim (no NA conversion, no type guessing) so coordinates and IDs are
+# written back exactly as in the sheet; rows keep the metadata file's order
+metadata <- read_tsv(snakemake@input[["metadata"]], na = character(),
+                     col_types = cols(.default = col_character()))
+if (!"sample" %in% names(metadata)) fail(snakemake@input[["metadata"]], " has no 'sample' column")
+dup_meta <- unique(metadata$sample[duplicated(metadata$sample)])
+if (length(dup_meta) > 0) fail("Duplicated samples in ", snakemake@input[["metadata"]], ": ", show(dup_meta))
+no_meta <- setdiff(sample_qc$sample, metadata$sample)
+if (length(no_meta) > 0) {
+    fail(length(no_meta), " sample(s) have QC but no row in ", snakemake@input[["metadata"]], ": ", show(no_meta))
+}
+
+sample_qc_meta <- metadata |>
+    select(-any_of("cov_cat")) |>
+    inner_join(select(tidy_numbers(sample_qc), -project), by = "sample")
+
+write_tsv(sample_qc_meta, snakemake@output[["sample_qc"]], na = "NA")
 write_tsv(tidy_numbers(read_qc),   snakemake@output[["read_qc"]],   na = "NA")
 
 message(sprintf("%d samples and %d lanes across %d project(s): %s",
