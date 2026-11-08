@@ -193,7 +193,7 @@ MULTIQC_REPORTS = [
 
 # QC summary tables across all projects
 QC_SUMMARY = [
-    f"{OUTDIR}/qc_summary/sample_qc_summary.tsv",
+    f"{OUTDIR}/qc_summary/all_clover_samples_metadata_withQC.txt",
     f"{OUTDIR}/qc_summary/read_qc_summary.tsv",
 ]
 
@@ -482,7 +482,8 @@ rule multiqc:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule 8: QC summary tables across all projects (R/tidyverse), localrule
-#   sample_qc_summary.tsv: one row per sample  (mosdepth, flagstat, Picard)
+#   all_clover_samples_metadata_withQC.txt: one row per sample, sample metadata
+#       from metadata_file + mosdepth, flagstat and Picard metrics
 #   read_qc_summary.tsv:   one row per lane    (fastp; FastQC R1 and R2)
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -496,9 +497,10 @@ LANE_TABLE = [
 rule qc_summary:
     input:
         multiqc = expand(f"{OUTDIR}/{{project}}/qc/multiqc/multiqc_data", project=PROJECTS),
-        samples = config["samples_file"],
+        samples  = config["samples_file"],
+        metadata = config.get("metadata_file", config["samples_file"]),
     output:
-        sample_qc = f"{OUTDIR}/qc_summary/sample_qc_summary.tsv",
+        sample_qc = f"{OUTDIR}/qc_summary/all_clover_samples_metadata_withQC.txt",
         read_qc   = f"{OUTDIR}/qc_summary/read_qc_summary.tsv",
     conda: "envs/r.yaml"
     log:

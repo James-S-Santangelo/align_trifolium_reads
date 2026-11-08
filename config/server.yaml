@@ -6,6 +6,10 @@
 # samples_file: "../resources/all_clover_samples.txt"
 samples_file: "../resources/TCAG_Trep_GWAS_reseq_samples.txt"
 
+# Sample metadata joined (by sample) onto the per-sample QC summary,
+# written as qc_summary/all_clover_samples_metadata_withQC.txt (cov_cat dropped)
+metadata_file: "../resources/all_clover_samples.txt"
+
 # Root directory to search recursively for FASTQs.
 # FASTQs must be named {sample}_*R1*.fastq.gz / {sample}_*R2*.fastq.gz
 fastq_dir: "/home/santang3/projects/def-santang3/raw_data/clover_gwas" # Narval
