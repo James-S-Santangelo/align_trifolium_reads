@@ -2,7 +2,7 @@
 Clover alignment pipeline
 =========================
 fastp → bwa mem (per lane) → samtools sort → merge lanes → GATK MarkDuplicates
-QC: FastQC (trimmed), flagstat, mosdepth, MultiQC
+QC: FastQC (trimmed), flagstat, mosdepth, MultiQC, cross-project QC summary tables (R)
 
 Notes on temp files
 -------------------
@@ -191,6 +191,12 @@ MULTIQC_REPORTS = [
     for p in PROJECTS
 ]
 
+# QC summary tables across all projects
+QC_SUMMARY = [
+    f"{OUTDIR}/qc_summary/sample_qc_summary.tsv",
+    f"{OUTDIR}/qc_summary/read_qc_summary.tsv",
+]
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Local rules — run on the head node, not submitted to the cluster scheduler.
 # Appropriate for steps that are fast enough not to need dedicated compute nodes.
@@ -199,7 +205,7 @@ MULTIQC_REPORTS = [
 # very large.
 # ──────────────────────────────────────────────────────────────────────────────
 
-localrules: all, flagstat, mosdepth
+localrules: all, flagstat, mosdepth, qc_summary
 
 # ──────────────────────────────────────────────────────────────────────────────
 # all
@@ -211,7 +217,8 @@ rule all:
         FLAGSTATS,
         MOSDEPTHS,
         FASTQC_DONE,
-        MULTIQC_REPORTS
+        MULTIQC_REPORTS,
+        QC_SUMMARY
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Rule 1: fastp — adapter trimming per lane
@@ -467,6 +474,38 @@ rule multiqc:
         """
         mkdir -p {params.outdir}
         printf "%s\n" {input} > {params.file_list}
-        multiqc --force --outdir {params.outdir} --file-list {params.file_list} 2> {log}
+        multiqc --force --outdir {params.outdir} --file-list {params.file_list} \
+            --cl-config "use_filename_as_sample_name: [fastp]" 2> {log}
         """
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Rule 8: QC summary tables across all projects (R/tidyverse), localrule
+#   sample_qc_summary.tsv: one row per sample  (mosdepth, flagstat, Picard)
+#   read_qc_summary.tsv:   one row per lane    (fastp; FastQC R1 and R2)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Lane index -> FASTQ pair, so read-level rows can be traced to their files
+LANE_TABLE = [
+    (s, int(l), os.path.relpath(SAMPLE_R1[s][int(l)], FASTQ_DIR),
+     os.path.relpath(SAMPLE_R2[s][int(l)], FASTQ_DIR))
+    for s in SAMPLES for l in SAMPLE_LANES[s]
+]
+
+rule qc_summary:
+    input:
+        multiqc = expand(f"{OUTDIR}/{{project}}/qc/multiqc/multiqc_data", project=PROJECTS),
+        samples = config["samples_file"],
+    output:
+        sample_qc = f"{OUTDIR}/qc_summary/sample_qc_summary.tsv",
+        read_qc   = f"{OUTDIR}/qc_summary/read_qc_summary.tsv",
+    conda: "envs/r.yaml"
+    log:
+        f"{OUTDIR}/logs/qc_summary/qc_summary.log",
+    params:
+        projects    = PROJECTS,
+        lane_sample = [x[0] for x in LANE_TABLE],
+        lane_index  = [x[1] for x in LANE_TABLE],
+        lane_r1     = [x[2] for x in LANE_TABLE],
+        lane_r2     = [x[3] for x in LANE_TABLE],
+    script:
+        "scripts/qc_summary.R"
