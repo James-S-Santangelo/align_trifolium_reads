@@ -4,7 +4,7 @@
 
 # Path to sample metadata TSV (must contain columns: sample, cov_cat)
 # samples_file: "../resources/all_clover_samples.txt"
-samples_file: "../resources/TCAG_Trep_GWAS_reseq_samples.txt"
+samples_file: "../resources/all_clover_samples.txt"
 
 # Sample metadata joined (by sample) onto the per-sample QC summary,
 # written as qc_summary/all_clover_samples_metadata_withQC.txt (cov_cat dropped)
@@ -12,18 +12,19 @@ metadata_file: "../resources/all_clover_samples.txt"
 
 # Root directory to search recursively for FASTQs.
 # FASTQs must be named {sample}_*R1*.fastq.gz / {sample}_*R2*.fastq.gz
-fastq_dir: "/home/santang3/projects/def-santang3/raw_data/clover_gwas" # Narval
-# fastq_dir: "/archive/raw_data/fastq/clover_gwas/raw_reads/tcag_reseq/lane1" # Nepenthes
+# fastq_dir: "/home/santang3/projects/def-santang3/raw_data/clover_gwas" # Narval
+fastq_dir: "/archive/raw_data/fastq/" # Nepenthes
 
 # Reference genome (indexed with bwa index and samtools faidx)
-reference: "/home/santang3/projects/def-santang3/refs/trifolium/UTM_Trep_v1.0/GCA_030408175.1_UTM_Trep_v1.0_genomic.fna" # (Narval)
-# reference: "/scratch/references/trifolium/repens/UTM_Trep_v1.0/GCA_030914245.1_UTM_Trep_v1.0_hap1_genomic.fna" # (Npenethes)
+# reference: "/home/santang3/projects/def-santang3/refs/trifolium/UTM_Trep_v1.0/GCA_030408175.1_UTM_Trep_v1.0_genomic.fna" # (Narval)
+reference: "/scratch/references/trifolium/repens/UTM_Trep_v1.0/GCA_030914245.1_UTM_Trep_v1.0_hap1_genomic.fna" # (Npenethes)
 
 # Output
-results_prefix: "/scratch/santang3/align_trifolium_reads/ref_panel"
+results_prefix: "/archive/align_trifolium_reads"
 
 # Scratch space for sambamba sort temporary files
-tmpdir: "$SLURM_TMPDIR"
+# tmpdir: "$SLURM_TMPDIR" # Narval
+tmpdir: "/tmp" # Nepenthes
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Resources by coverage category
