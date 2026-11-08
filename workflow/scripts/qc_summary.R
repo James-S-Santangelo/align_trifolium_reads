@@ -35,6 +35,7 @@ sheet <- read_tsv(snakemake@input[["samples"]], col_types = cols(.default = col_
 
 # Sample-level metrics kept in sample_qc (MultiQC column -> output column)
 SAMPLE_METRICS <- c(
+    "mosdepth-median_coverage"                   = "median_coverage",
     "mosdepth-mean_coverage"                     = "mean_coverage",
     "samtools_flagstat-flagstat_total"           = "total_reads_M",
     "samtools_flagstat-mapped_passed_pct"        = "pct_mapped",

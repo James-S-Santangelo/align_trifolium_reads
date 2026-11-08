@@ -450,6 +450,8 @@ def multiqc_inputs(wildcards):
                 )
         inputs.append(f"{OUTDIR}/{proj}/qc/flagstat/{s}.flagstat")
         inputs.append(f"{OUTDIR}/{proj}/qc/mosdepth/{s}.mosdepth.summary.txt")
+        # MultiQC computes median coverage from the global distribution
+        inputs.append(f"{OUTDIR}/{proj}/qc/mosdepth/{s}.mosdepth.global.dist.txt")
         inputs.append(f"{OUTDIR}/{proj}/markdup/{s}.markdup.metrics.txt")
     return inputs
 
