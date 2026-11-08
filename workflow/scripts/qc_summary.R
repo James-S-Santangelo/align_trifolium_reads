@@ -80,6 +80,15 @@ gs_all <- bind_rows(Map(read_project, multiqc_dirs, projects))  # base Map: erro
 missing_cols <- setdiff(names(SAMPLE_METRICS), names(gs_all))
 if (length(missing_cols) > 0) fail("MultiQC general stats lack column(s): ", show(missing_cols))
 
+# Percent of genome at >= tX, for whichever thresholds MultiQC exported
+# (default 1, 5, 10, 30, 50X); inserted after mean_coverage
+cov_cols <- str_subset(names(gs_all), "^mosdepth-\\d+_x_pc$")
+if (length(cov_cols) == 0) fail("MultiQC general stats lack mosdepth genome-coverage columns (mosdepth-<t>_x_pc)")
+cov_cols <- cov_cols[order(as.integer(str_extract(cov_cols, "\\d+")))]
+cov_metrics <- setNames(paste0("pct_genome_ge_", str_extract(cov_cols, "\\d+"), "x"), cov_cols)
+i <- match("mosdepth-mean_coverage", names(SAMPLE_METRICS))
+SAMPLE_METRICS <- c(SAMPLE_METRICS[1:i], cov_metrics, SAMPLE_METRICS[-(1:i)])
+
 sample_long <- gs_all |>
     select(project, sample, all_of(names(SAMPLE_METRICS))) |>
     pivot_longer(all_of(names(SAMPLE_METRICS)), names_to = "metric", values_drop_na = TRUE)
